@@ -1,0 +1,39 @@
+# Poetry
+.venv/
+#poetry.lock
+
+# Python 
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+
+# IDEs e editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testes
+.pytest_cache/
+.coverage
+htmlcov/
+nosetests.xml
+coverage.xml
+
+# Banco de dados local (se não quiser versionar)
+data/automoveis.db
+*.sqllite3
+
+# Sistema Operacional
+.DS_Store
+Tumbs.db
+
+# Arquivos de build 
+dist/
+build/
+*.egg-info/
+
+
+
