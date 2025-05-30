@@ -73,3 +73,9 @@ class Automovel(BaseModel):
 
 # Para facilitar a importação, adicione no src/models/__init__.py:
 # from .automovel_model import Automovel, TipoCombustivelEnum, TipoTransmissaoEnum
+
+##
+
+
+
+
