@@ -1,97 +1,155 @@
 # src/agent/terminal_agent.py
 import requests
 import json
-import re # Para expressões regulares
+import re
+import os
+from dotenv import load_dotenv # Para carregar variáveis de ambiente
 
-from src.models.automovel_model import TipoCombustivelEnum # Para validar/sugerir
+# LangChain e Gemini Imports
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field # Usar Pydantic v2 diretamente
+from langchain_core.output_parsers import PydanticOutputParser
+from typing import Optional, List
 
-SERVER_URL = "http://127.0.0.1:8000/api/v1/automoveis/buscar" # Mesma do cliente
+# Importações do nosso projeto
+from src.models.automovel_model import TipoCombustivelEnum
 
-# Marcas conhecidas para facilitar a extração
-MARCAS_CONHECIDAS = ["fiat", "volkswagen", "chevrolet", "ford", "hyundai", "toyota", "renault", "honda", "jeep", "nissan", "peugeot", "citroen", "bmw", "mercedes", "audi"]
+# Carregar variáveis de ambiente do arquivo .env que deve estar na raiz do projeto
+load_dotenv()
 
-def extrair_entidades(texto_usuario: str, slots_atuais: dict) -> dict:
+SERVER_URL = "http://127.0.0.1:8000/api/v1/automoveis/buscar"
+
+# --- Definição do Esquema de Saída para o LLM com Pydantic V2 ---
+class ExtracaoFiltrosCarro(BaseModel):
     """
-    Tenta extrair entidades relevantes do texto do usuário.
-    Abordagem MUITO simples baseada em palavras-chave e regex.
+    Define a estrutura de dados que esperamos que o LLM extraia
+    do texto do usuário sobre as preferências de um carro.
     """
-    texto_lower = texto_usuario.lower()
-    novos_slots = slots_atuais.copy() # Não modificar os slots originais diretamente aqui
+    marca: Optional[str] = Field(default=None, description="A marca do carro mencionada, se houver. Ex: Fiat, Volkswagen.")
+    modelo: Optional[str] = Field(default=None, description="O nome ou código alfanumérico do modelo do carro. Ex: Uno, Gol, Corolla, Renegade. Não deve ser apenas um número de ano.")
+    ano_min: Optional[int] = Field(default=None, description="O ano mínimo de fabricação desejado, se mencionado. Ex: 2018.")
+    ano_max: Optional[int] = Field(default=None, description="O ano máximo de fabricação desejado, se mencionado. Ex: 2022.")
+    tipo_combustivel: Optional[str] = Field(default=None, description=f"O tipo de combustível desejado, se mencionado. Se possível, normalize para um dos seguintes: {', '.join([e.value for e in TipoCombustivelEnum])}.")
+    preco_min: Optional[float] = Field(default=None, description="O preço mínimo desejado em Reais, se mencionado. Ex: 30000.0.")
+    preco_max: Optional[float] = Field(default=None, description="O preço máximo desejado em Reais, se mencionado. Ex: 50000.0.")
+    outras_caracteristicas: Optional[List[str]] = Field(default_factory=list, description="Outras características ou palavras-chave relevantes mencionadas pelo usuário que não se encaixam nos campos acima. Ex: novo, usado, vermelho, 4 portas, econômico.")
 
-    # 1. Extrair Marca
-    if not novos_slots.get("marca"): # Só extrai se ainda não tivermos uma marca
-        for marca in MARCAS_CONHECIDAS:
-            if marca in texto_lower:
-                novos_slots["marca"] = marca.capitalize() # Armazena com a primeira letra maiúscula
-                # Remover a marca do texto para evitar que seja confundida com modelo
-                texto_lower = texto_lower.replace(marca, "").strip()
-                break # Pega a primeira marca encontrada
+# --- Função de Extração de Entidades com LLM ---
+def extrair_entidades_com_llm(texto_usuario: str, slots_atuais: dict) -> dict:
+    """
+    Usa um LLM (Gemini via LangChain) para extrair entidades do texto do usuário
+    e atualizar os slots.
+    """
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+    if not google_api_key:
+        print("\n⚠️  Chave de API do Google (GOOGLE_API_KEY) não encontrada no arquivo .env.")
+        print("    Por favor, crie um arquivo .env na raiz do projeto com sua chave.")
+        print("    Exemplo: GOOGLE_API_KEY=\"SUA_CHAVE_AQUI\"")
+        print("    Retornando aos slots atuais sem extração por LLM.\n")
+        return slots_atuais
 
-    # 2. Extrair Ano (simples regex para 4 dígitos entre 1900-20XX)
-    # Consideraremos o primeiro ano encontrado como ano_min por simplicidade
-    # Se houver "até ANO", "antes de ANO", consideraremos ano_max
-    # Se houver "depois de ANO", "a partir de ANO", consideraremos ano_min
-    anos_encontrados = re.findall(r'\b(19\d{2}|20\d{2})\b', texto_lower)
-    if anos_encontrados:
-        anos_numericos = sorted([int(ano) for ano in anos_encontrados])
-        if not novos_slots.get("ano_min") and not novos_slots.get("ano_max"): # Se nenhum ano foi definido
-            if len(anos_numericos) == 1:
-                # Se "até ANO" ou "antes de ANO"
-                if any(term in texto_lower for term in ["ate", "antes de", "maximo de", "menos de"]):
-                    novos_slots["ano_max"] = anos_numericos[0]
-                else: # Caso contrário, assume como ano específico (ou ano mínimo)
-                    novos_slots["ano_min"] = anos_numericos[0]
-                    # Poderia também definir ano_max se for uma busca por ano específico.
-                    # Para simplicidade, o servidor já pode tratar ano_min=X e ano_max=X.
-            elif len(anos_numericos) >= 2:
-                novos_slots["ano_min"] = anos_numericos[0]
-                novos_slots["ano_max"] = anos_numericos[-1]
-    
-    # 3. Extrair Tipo de Combustível
-    if not novos_slots.get("tipo_combustivel"):
-        for combustivel in TipoCombustivelEnum:
-            if combustivel.value.lower() in texto_lower:
-                novos_slots["tipo_combustivel"] = combustivel.value
-                break
-    
-    # 4. Extrair Preço Máximo (ex: "até 50000", "menos de 30 mil")
-    if not novos_slots.get("preco_max"):
-        match_preco = re.search(r'(?:ate|maximo de|menos de|por menos de)\s*R?\$\s*([\d\.]+)(?:\s*mil)?', texto_lower, re.IGNORECASE)
-        if match_preco:
-            preco_str = match_preco.group(1).replace('.', '')
-            preco = float(preco_str)
-            if "mil" in match_preco.group(0).lower(): # Se a palavra "mil" estiver presente
-                preco *= 1000
-            novos_slots["preco_max"] = preco
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=google_api_key, temperature=0.1)
+    parser = PydanticOutputParser(pydantic_object=ExtracaoFiltrosCarro)
+    lista_combustiveis_str = ", ".join([e.value for e in TipoCombustivelEnum])
 
-    # 5. Extrair Modelo (muito simplista: o que sobrou e não é stopword comum)
-    # Esta é a parte mais frágil sem NLU avançado.
-    if novos_slots.get("marca") and not novos_slots.get("modelo"):
-        # Remove termos comuns e o que já foi identificado
-        palavras_restantes = texto_lower
-        if novos_slots.get("tipo_combustivel"):
-            palavras_restantes = palavras_restantes.replace(novos_slots["tipo_combustivel"].lower(), "")
-        
-        # Remove anos já capturados
-        for ano_str_re in re.findall(r'\b(19\d{2}|20\d{2})\b', palavras_restantes):
-            palavras_restantes = palavras_restantes.replace(ano_str_re, "")
+    prompt_template_str = """
+    Sua tarefa é analisar a solicitação de um usuário que está procurando um carro e extrair os critérios de busca.
+    Preencha os campos do JSON de saída com as informações extraídas.
+    Se uma informação não for explicitamente mencionada pelo usuário, deixe o campo correspondente como nulo ou omita-o.
+    Não invente informações. Seja o mais fiel possível ao que o usuário disse.
 
-        # Remove termos de preço
-        palavras_restantes = re.sub(r'(?:ate|maximo de|menos de|por menos de)\s*R?\$\s*([\d\.]+)(?:\s*mil)?', "", palavras_restantes, flags=re.IGNORECASE)
+    Instruções específicas para os campos:
+    - 'marca': A fabricante do veículo (ex: Fiat, Chevrolet).
+    - 'modelo': O nome ou código específico do veículo dentro da marca (ex: Uno, Onix, Renegade). O campo 'modelo' NÃO deve ser preenchido com um número de ano. Se o usuário mencionar apenas um ano e uma marca, o campo 'modelo' deve permanecer nulo, a menos que um nome de modelo seja claramente identificável.
+    - 'ano_min', 'ano_max': Anos de fabricação. Se o usuário mencionar um único ano (ex: "carro de 2019"), interprete-o como ano_min = 2019 e ano_max = 2019, a menos que termos como "a partir de", "desde" (para ano_min) ou "até", "antes de" (para ano_max) especifiquem uma faixa.
+    - 'tipo_combustivel': Se mencionado, normalize para um dos seguintes valores: {lista_combustiveis}.
+    - 'preco_min', 'preco_max': Valores de preço em Reais. Converta para float (ex: "30 mil" para 30000.0, "entre R$20k e R$25.000" para preco_min=20000.0 e preco_max=25000.0).
+    - 'outras_caracteristicas': Uma lista de outras palavras-chave ou atributos mencionados (ex: cor, número de portas, "econômico", "novo").
 
-        # Remove algumas stopwords comuns e termos de busca
-        stopwords = ["quero", "gostaria", "procuro", "um", "uma", "carro", "veiculo", "de", "da", "do", "com", "sem", "para", "e", "ou", "me", "acha", "encontra"]
-        for sw in stopwords:
-            palavras_restantes = palavras_restantes.replace(f" {sw} ", " ").strip()
-        
-        modelo_candidato = palavras_restantes.strip()
-        if modelo_candidato and len(modelo_candidato.split()) <= 2 and len(modelo_candidato) > 1: # Modelo com 1 ou 2 palavras
-            # Evitar pegar apenas números ou restos de palavras-chave
-            if not modelo_candidato.isdigit() and modelo_candidato not in ["mil", "r$"]:
-                novos_slots["modelo"] = modelo_candidato.capitalize()
-    
-    return novos_slots
+    TEXTO DO USUÁRIO:
+    "{texto_do_usuario}"
 
+    FILTROS JÁ COLETADOS ANTERIORMENTE (se houver algum valor, tente não sobrescrevê-lo a menos que o usuário esteja claramente corrigindo ou especificando algo novo para esse mesmo filtro):
+    Marca atual: {marca_atual}
+    Modelo atual: {modelo_atual}
+    Ano mínimo atual: {ano_min_atual}
+    Ano máximo atual: {ano_max_atual}
+    Tipo de combustível atual: {tipo_combustivel_atual}
+    Preço mínimo atual: {preco_min_atual}
+    Preço máximo atual: {preco_max_atual}
+
+    INSTRUÇÕES DE FORMATAÇÃO (siga estritamente):
+    {format_instructions}
+    """
+
+    prompt = ChatPromptTemplate.from_template(
+        template=prompt_template_str,
+        partial_variables={
+            "format_instructions": parser.get_format_instructions(),
+            "lista_combustiveis": lista_combustiveis_str
+        }
+    )
+
+    chain = prompt | llm | parser
+
+    print("\n🤖 Consultando o Gemini para entender sua solicitação...")
+    try:
+        contexto_slots = {
+            "marca_atual": slots_atuais.get("marca") or "não definido",
+            "modelo_atual": slots_atuais.get("modelo") or "não definido",
+            "ano_min_atual": slots_atuais.get("ano_min") or "não definido",
+            "ano_max_atual": slots_atuais.get("ano_max") or "não definido",
+            "tipo_combustivel_atual": slots_atuais.get("tipo_combustivel") or "não definido",
+            "preco_min_atual": slots_atuais.get("preco_min") or "não definido",
+            "preco_max_atual": slots_atuais.get("preco_max") or "não definido",
+        }
+
+        input_data_for_llm = {
+            "texto_do_usuario": texto_usuario,
+            **contexto_slots
+        }
+
+        resultado_llm: ExtracaoFiltrosCarro = chain.invoke(input_data_for_llm)
+        novos_slots = slots_atuais.copy()
+
+        # Lógica de Pós-Processamento para o campo 'modelo'
+        if resultado_llm.modelo and resultado_llm.modelo.isdigit() and len(resultado_llm.modelo) == 4:
+            is_year_min = resultado_llm.ano_min and int(resultado_llm.modelo) == resultado_llm.ano_min
+            is_year_max = resultado_llm.ano_max and int(resultado_llm.modelo) == resultado_llm.ano_max
+            if is_year_min or is_year_max:
+                print(f"   ℹ️ Corrigindo: LLM colocou o ano '{resultado_llm.modelo}' como modelo. Removendo do modelo.")
+                resultado_llm.modelo = None
+
+        for campo, valor_llm in resultado_llm.model_dump().items():
+            if valor_llm is not None:
+                if campo == "outras_caracteristicas" and not valor_llm:
+                    continue
+                if campo in novos_slots:
+                    if novos_slots[campo] is None or (novos_slots[campo] != valor_llm and campo != "outras_caracteristicas"):
+                        if campo == "tipo_combustivel":
+                            try:
+                                valor_llm_str = str(valor_llm)
+                                if not any(v == valor_llm_str for v in TipoCombustivelEnum._value2member_map_):
+                                    valor_llm_str = valor_llm_str.capitalize()
+                                enum_val = TipoCombustivelEnum(valor_llm_str)
+                                novos_slots[campo] = enum_val.value
+                                print(f"   LLM atualizou/preencheu '{campo}': {enum_val.value}")
+                            except ValueError:
+                                print(f"   ⚠️ LLM sugeriu um tipo de combustível inválido ou não normalizado: '{valor_llm}'. Slot não atualizado.")
+                        else:
+                            novos_slots[campo] = valor_llm
+                            print(f"   LLM atualizou/preencheu '{campo}': {valor_llm}")
+                    elif campo == "outras_caracteristicas" and valor_llm and novos_slots[campo] != valor_llm :
+                        novos_slots[campo] = valor_llm # Substitui lista de outras características
+                        print(f"   LLM atualizou/preencheu '{campo}': {valor_llm}")
+        return novos_slots
+    except Exception as e:
+        print(f"❌ Erro crítico ao interagir com o LLM: {e}")
+        import traceback
+        traceback.print_exc()
+        print("Retornando aos slots atuais.")
+        return slots_atuais
 
 def apresentar_resultados(automoveis: list):
     if not automoveis:
@@ -109,117 +167,80 @@ def apresentar_resultados(automoveis: list):
         print(f"  Combustível: {carro.get('tipo_combustivel', 'N/A')}")
         print(f"  Transmissão: {carro.get('transmissao', 'N/A')}")
         print(f"  Quilometragem: {carro.get('quilometragem', 'N/A')} km")
-        print(f"  Preço: R$ {carro.get('preco', 0.0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")) # Formato BR
+        print(f"  Preço: R$ {carro.get('preco', 0.0):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     print("-" * 20)
 
-
 def interagir_com_servidor(slots_coletados: dict) -> list:
-    """Envia os filtros para o servidor e retorna a lista de automóveis."""
     payload_filtros = {}
-    if slots_coletados.get("marca"):
-        payload_filtros["marca"] = slots_coletados["marca"]
-    if slots_coletados.get("modelo"):
-        payload_filtros["modelo"] = slots_coletados["modelo"]
-    if slots_coletados.get("ano_min"):
-        payload_filtros["ano_min"] = slots_coletados["ano_min"]
-    if slots_coletados.get("ano_max"):
-        payload_filtros["ano_max"] = slots_coletados["ano_max"]
-    if slots_coletados.get("tipo_combustivel"):
-        payload_filtros["tipo_combustivel"] = slots_coletados["tipo_combustivel"]
-    if slots_coletados.get("preco_max"):
-        payload_filtros["preco_max"] = slots_coletados["preco_max"]
-
-    if not payload_filtros: # Se nenhum filtro útil foi extraído
-        print("🤔 Não consegui identificar filtros na sua solicitação para buscar.")
-        # Poderia pedir para o usuário tentar de novo ou ser mais específico
-        # Por ora, se não houver filtros, podemos buscar tudo (ou os primeiros X)
-        # Ou podemos decidir que pelo menos um filtro é necessário.
-        # Para este exemplo, vamos buscar tudo se nenhum filtro for extraído.
-        # O servidor já tem uma paginação padrão.
-        pass
-
+    campos_permitidos_servidor = ["marca", "modelo", "ano_min", "ano_max", "tipo_combustivel", "preco_max", "preco_min"]
+    for campo, valor in slots_coletados.items():
+        if valor is not None and campo in campos_permitidos_servidor:
+            # Para campos de lista como 'outras_caracteristicas', não incluímos diretamente
+            # a menos que o servidor tenha um campo específico para eles.
+            if not isinstance(valor, list):
+                 payload_filtros[campo] = valor
 
     payload_mcp = {
-        "filtros": payload_filtros,
-        "paginacao": {"pagina": 1, "itens_por_pagina": 5} # Pegar os 5 primeiros resultados
+        "filtros": payload_filtros if payload_filtros else None,
+        "paginacao": {"pagina": 1, "itens_por_pagina": 5}
     }
-
     print(f"\n🕵️ Buscando com os seguintes filtros: {payload_filtros if payload_filtros else 'todos os carros'}...")
-    
     try:
         response = requests.post(SERVER_URL, json=payload_mcp)
         response.raise_for_status()
         response_data = response.json()
-
         if response_data.get("sucesso") and response_data.get("dados"):
             return response_data["dados"].get("automoveis", [])
         else:
             print(f"❌ Erro do servidor: {response_data.get('mensagem', 'Não foi possível obter os dados.')}")
-            if response_data.get("erros"):
-                print(f"   Detalhes: {response_data['erros']}")
+            if response_data.get("erros"): print(f"   Detalhes: {response_data['erros']}")
             return []
     except requests.exceptions.RequestException as e:
         print(f"🔌 Ops! Não consegui me conectar ao servidor de busca: {e}")
         return []
     except json.JSONDecodeError:
-        print("📋 Erro ao processar a resposta do servidor (não era JSON válido).")
+        print("📋 Erro ao processar a resposta do servidor (não era JSON válido). Resposta:")
+        print(response.text if 'response' in locals() else "N/A")
         return []
 
-
 def iniciar_conversa():
-    print("👋 Olá! Sou seu agente virtual de busca de carros.")
-    print("Como posso te ajudar a encontrar um veículo hoje? (Ex: 'quero um Fiat Uno até 30000')")
-    
+    print("👋 Olá! Sou seu agente virtual de busca de carros (com Gemini!).")
+    print("Como posso te ajudar a encontrar um veículo hoje? (Ex: 'quero um Fiat Uno até 30000', 'Chevrolet Onix 2019 flex')")
     slots = {
-        "marca": None, "modelo": None, "ano_min": None, "ano_max": None, 
-        "tipo_combustivel": None, "preco_max": None
+        "marca": None, "modelo": None, "ano_min": None, "ano_max": None,
+        "tipo_combustivel": None, "preco_min": None, "preco_max": None,
+        "outras_caracteristicas": []
     }
-    campos_necessarios_para_busca_automatica = 1 # Pelo menos 1 filtro para buscar automaticamente
-
     while True:
         entrada_usuario = input("\nVocê: ").strip()
-        if not entrada_usuario:
-            print("Por favor, me diga o que você procura.")
+        if not entrada_usuario and not any(value for key, value in slots.items() if key != "outras_caracteristicas" and value is not None): # Se entrada vazia E nenhum filtro real preenchido
+            print("Por favor, me diga o que você procura ou forneça alguns detalhes.")
             continue
 
-        if entrada_usuario.lower() in ["sair", "exit", "fim", "tchau"]:
+        if entrada_usuario.lower() in ["sair", "exit", "fim", "tchau", "quit", "parar"]:
             print("Até logo! 👋")
             break
 
-        # Tentar extrair entidades da nova entrada
-        slots = extrair_entidades(entrada_usuario, slots)
-        
-        print(f"ℹ️ Entendi até agora: Marca: {slots['marca']}, Modelo: {slots['modelo']}, Ano Min: {slots['ano_min']}, Ano Max: {slots['ano_max']}, Combustível: {slots['tipo_combustivel']}, Preço Máx: {slots['preco_max']}")
+        if entrada_usuario or not any(value for key, value in slots.items() if key != "outras_caracteristicas" and value is not None): # Processa se houver entrada ou se nenhum filtro útil
+            slots = extrair_entidades_com_llm(entrada_usuario, slots)
 
-        # Lógica de perguntas para preencher slots faltantes
-        # Esta parte pode ser expandida para ser mais inteligente
-        
-        filtros_preenchidos = sum(1 for val in slots.values() if val is not None)
+        feedback_slots = {k: v for k, v in slots.items() if v is not None and (not isinstance(v, list) or v)}
+        if feedback_slots:
+            feedback_str = ", ".join([f"{k.replace('_', ' ').capitalize()}: {v}" for k,v in feedback_slots.items()])
+            print(f"ℹ️ Entendi até agora: {feedback_str}")
+        elif entrada_usuario : # Se houve entrada mas o LLM não pegou nada útil
+            print("ℹ️ Humm, não consegui extrair filtros específicos dessa vez. Pode tentar de novo ou ser mais detalhado?")
 
-        if entrada_usuario.lower() == "buscar" or "buscar agora" in entrada_usuario.lower() or "procurar" in entrada_usuario.lower():
-            if filtros_preenchidos > 0:
-                automoveis = interagir_com_servidor(slots)
-                apresentar_resultados(automoveis)
-                # Resetar slots para nova busca ou refinar? Por ora, vamos resetar.
-                slots = {k: None for k in slots} 
-                print("\nO que mais posso fazer por você? (Ou digite 'sair')")
-            else:
-                print("Por favor, me dê alguns detalhes do que você procura antes de pedir para buscar.")
+
+        filtros_reais_preenchidos_count = sum(1 for k, val in slots.items() if k != "outras_caracteristicas" and val is not None and (not isinstance(val, list) or val) )
+
+        if entrada_usuario.lower() in ["buscar", "procurar"] or (not entrada_usuario and filtros_reais_preenchidos_count > 0):
+            automoveis = interagir_com_servidor(slots)
+            apresentar_resultados(automoveis)
+            print("\nO que mais posso fazer por você? (Forneça mais detalhes, 'buscar' novamente, ou 'sair')")
             continue
 
-
-        if not slots["marca"]:
-            print("Agente: Qual marca de carro você tem em mente?")
-            continue # Volta para pegar a próxima entrada do usuário
-        
-        # Se já temos uma marca, mas não muitos outros filtros, podemos perguntar mais.
-        if filtros_preenchidos < 2 and not slots["preco_max"] : # Exemplo de condição para mais perguntas
-             print("Agente: Alguma faixa de preço específica ou ano de preferência?")
-             continue
-        
-        # Se o usuário forneceu vários detalhes de uma vez, ou se já temos alguns filtros
-        if filtros_preenchidos >= campos_necessarios_para_busca_automatica:
-            print("Agente: Entendido. Você gostaria de buscar com esses critérios ou adicionar mais alguma informação? (digite 'buscar' ou forneça mais detalhes)")
-            # Não buscamos automaticamente aqui, esperamos o usuário confirmar com 'buscar' ou adicionar mais.
-        else:
-             print("Agente: Pode me dar mais alguns detalhes? Como ano, tipo de combustível ou faixa de preço?")
+        if filtros_reais_preenchidos_count == 0 and entrada_usuario:
+            print("Agente: Humm, não entendi bem. Pode tentar descrever de outra forma o carro que você busca?")
+        elif entrada_usuario:
+            print("Agente: Ok. Adicione mais detalhes se quiser, ou digite 'buscar' para ver os resultados.")

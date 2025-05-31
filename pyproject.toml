@@ -6,7 +6,7 @@ authors = [
     {name = "jonatasscdc",email = "jonatasscdc@hotmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11.0,<4.0"
 dependencies = [
     "fastapi (>=0.115.12,<0.116.0)",
     "uvicorn[standard] (>=0.34.2,<0.35.0)",
@@ -14,7 +14,10 @@ dependencies = [
     "email-validator (>=2.2.0,<3.0.0)",
     "faker (>=37.3.0,<38.0.0)",
     "requests (>=2.32.3,<3.0.0)",
-    "sqlalchemy (>=2.0.41,<3.0.0)"
+    "sqlalchemy (>=2.0.41,<3.0.0)",
+    "langchain (>=0.3.25,<0.4.0)",
+    "langchain-google-genai (>=2.1.5,<3.0.0)",
+    "python-dotenv (>=1.1.0,<2.0.0)"
 ]
 
 [tool.poetry]
