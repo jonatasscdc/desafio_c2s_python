@@ -153,7 +153,7 @@ Para incluir um relatório de cobertura de testes (requer `pytest-cov`):
 poetry run pytest --cov=src -v
 ```
 
-## Demonstração da "Bagagem Sênior"
+## Habilidades demonstradas neste projeto
 
 Este projeto busca demonstrar experiência e maturidade em desenvolvimento através de:
 
