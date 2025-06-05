@@ -25,6 +25,7 @@ packages = [{include = "desafio_c2s_python", from = "src"}]
 
 
 [tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
 pytest-cov = "^6.1.1"
 httpx = "^0.28.1"
 
