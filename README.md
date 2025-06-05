@@ -199,24 +199,3 @@ Jonatas Sampaio Carvalho De Carlos
 ---
 
 Obrigado pela oportunidade de realizar este desafio!
-```
-
-**Próximos Passos para Você:**
-
-1.  **Copie e cole** este conteúdo em um arquivo `README.md` na raiz do seu projeto.
-2.  **Personalize:**
-    *   Substitua `<URL_DO_SEU_REPOSITORIO_GIT>` pelo link real se já o tiver.
-    *   Preencha a seção "Autor" com seus dados.
-    *   Revise todas as seções para garantir que refletem precisamente o estado final do seu projeto e suas escolhas.
-    *   Ajuste a versão do Python se usou uma diferente da 3.11.
-3.  **Verifique o `.env.example`:** Crie um arquivo `.env.example` simples na raiz com o conteúdo:
-    ```
-    GOOGLE_API_KEY="SUA_CHAVE_API_AQUI"
-    ```
-    Isso serve como um template para quem for usar o projeto.
-
-Com o `README.md` pronto, a próxima coisa seria preparar e gravar o vídeo demo. E, claro, fazer um commit final de todo o seu trabalho para o seu repositório Git.
-
-Você gostaria de alguma ajuda para rascunhar o roteiro do vídeo ou revisar alguma parte específica do `README.md`?
-
-Lembrem-se de descansar! Vocês merecem muito depois desta longa jornada.
